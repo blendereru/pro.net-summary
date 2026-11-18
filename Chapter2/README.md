@@ -299,3 +299,94 @@ If the CPU specifically requested chunk `C5` in the middle of the 16-chunk block
 
 * **Sequential Data (`int[]`, `List<T>`, `Span<T>`):** Elements sit contiguously in memory. Reading `array[0]` triggers a single DRAM burst that automatically loads the entire **64-byte cache line** (`array[0]..array[15]`) into CPU cache for free.
 * **Scattered Heap Objects (`LinkedList<T>`, scattered class graphs):** Following random pointers triggers an entire 64-byte DRAM burst, uses only 8 bytes, discards the remaining 56 bytes, and stalls the CPU for ~200–300 cycles waiting for the next slow capacitor read.
+
+
+---
+
+## Multi-Stage Circuits: Gate Delay, Critical Path & Pipelining
+
+Every Flip-Flop inside a CPU core shares the **exact same master Clock**. Therefore, the **CPU Clock Cycle must always be slightly longer than the slowest chain of logic gates** sitting between any two Flip-Flops (the **Critical Path**).
+
+---
+
+### 1. Multi-Stage Circuit Setup (3 Flip-Flops & 2 Stages)
+
+Consider data flowing through two sequential stages separated by Flip-Flops (`FF1`, `FF2`, `FF3`):
+
+```text
+          STAGE 1 (Slow: 40 ps)                     STAGE 2 (Fast: 20 ps)
+ ┌─────┐   ┌───────────────────────┐   ┌─────┐   ┌─────────────────┐   ┌─────┐
+ │ FF1 ├──►│  4-Bit Ripple Adder   ├──►│ FF2 ├──►│  2-Gate Increment├──►│ FF3 │
+ └──▲──┘   │  (4 gates × 10 ps)    │   └──▲──┘   │  (2 gates × 10ps)│   └──▲──┘
+    │      └───────────────────────┘      │      └─────────────────┘      │
+    │                                     │                               │
+    └───────────────────────┬─────────────┴───────────────────────────────┘
+                            │
+                     [ MASTER CLOCK ]  (Ticks at the EXACT same time for all FFs!)
+```
+
+Physical silicon delays in this model:
+* **Flip-Flop overhead:** $5\text{ ps}$ launch time + $5\text{ ps}$ capture setup time = **$10\text{ ps}$**.
+* **Per-gate propagation delay:** **$10\text{ ps}$** (time for electrons to charge wires and switch transistors).
+* **Stage 1 (4-Bit Adder):** $4 \times 10\text{ ps} = \mathbf{40\text{ ps}}$ to settle.
+* **Stage 2 (Incrementer):** $2 \times 10\text{ ps} = \mathbf{20\text{ ps}}$ to settle.
+
+---
+
+### 2. The Critical Path Sets the Minimum Clock Cycle
+
+Even though Stage 2 finishes in $20\text{ ps}$, the entire CPU must wait for the slowest stage (Stage 1):
+
+$$\text{Minimum Clock Cycle} = \underbrace{5\text{ ps}}_{\text{FF1 Launch}} + \underbrace{40\text{ ps}}_{\text{Stage 1 (Slowest)}} + \underbrace{5\text{ ps}}_{\text{FF2 Capture}} = \mathbf{50\text{ ps}}$$
+
+* **Maximum Safe Frequency:** $\frac{1}{50\text{ ps}} = \mathbf{20\text{ GHz}}$ *(real 64-bit CPUs have ~25–30 gate delays per stage, yielding $\sim 300\text{ ps}$ cycles or $\sim 3.3\text{ GHz}$)*.
+
+---
+
+### 3. Timeline Trace: Safe Cycle ($50\text{ ps}$) vs. Too-Fast Cycle ($25\text{ ps}$)
+
+#### Case A: Safe Clock Cycle ($50\text{ ps}$)
+Feeding `0111 + 0001` (`7 + 1 = 8`) into `FF1` while `FF2` launches `2` into Stage 2:
+
+```text
+Time       Master Clock   Stage 1 (4-Bit Adder: 40 ps)              Stage 2 (2-Gate Inc: 20 ps)
+──────────────────────────────────────────────────────────────────────────────────────────────────
+t = 0 ps   ▲ RISING EDGE  FF1 opens & launches (7 + 1)              FF2 opens & launches (2)
+t = 5 ps                  Inputs arrive at Adder gates              Input arrives at Inc gates
+t = 15 ps                 Gate 0 finishes (output flickers: 0110)   Gate 0 finishes
+t = 25 ps                 Gate 1 finishes (output flickers: 0100)   Gate 1 finishes! Answer=3 STABLE!
+t = 35 ps                 Gate 2 finishes (output flickers: 0000)   (Stage 2 sits idle, waiting...)
+t = 45 ps                 Gate 3 finishes! Answer=1000 (8) STABLE!  (Stage 2 sits idle, waiting...)
+t = 50 ps  ▲ RISING EDGE  FF2 captures '8' cleanly!                 FF3 captures '3' cleanly!
+                          (FF1 launches next number into Stage 1!)  (FF2 launches '8' into Stage 2!)
+```
+
+#### Case B: Shrinking the Clock Cycle Too Far ($25\text{ ps}$ — Overclock Failure)
+If the clock ticks at $25\text{ ps}$ without reducing the $10\text{ ps}$ physical gate delay:
+
+```text
+Time       Master Clock   Stage 1 (4-Bit Adder: needs 40 ps!)       Stage 2 (Needs 20 ps)
+──────────────────────────────────────────────────────────────────────────────────────────────────
+t = 0 ps   ▲ RISING EDGE  FF1 launches (7 + 1)                      FF2 launches (2)
+t = 5 ps                  Inputs enter Gate 0                       Inputs enter Gate 0
+t = 15 ps                 Gate 0 finishes (flickers: 0110)          Gate 0 finishes
+t = 25 ps  ▲ RISING EDGE  Gate 1 JUST finished (output is 0100 = 4) Gate 1 JUST finished (Answer = 3)
+                          💥 FF2 SNAPS SHUT MID-GLITCH!
+                          FF2 CAPTURES GARBAGE VALUE '4' INSTEAD OF '8'!
+```
+
+---
+
+### 4. Breaking Past the Bottleneck: CPU Pipelining
+
+To run at higher frequencies without faster electrons, CPUs split slow logic chains by inserting an extra Flip-Flop (`FF_mid`):
+
+```text
+  STAGE 1A (20 ps)           STAGE 1B (20 ps)           STAGE 2 (20 ps)
+ ┌───┐  ┌──────────┐  ┌────────┐  ┌──────────┐  ┌───┐  ┌──────────┐  ┌───┐
+ │FF1├─►│Gates 0..1├─►│ FF_mid ├─►│Gates 2..3├─►│FF2├─►│Gates 0..1├─►│FF3│
+ └───┘  └──────────┘  └────────┘  └──────────┘  └───┘  └──────────┘  └───┘
+```
+
+* Every stage between Flip-Flops now takes only **$20\text{ ps}$** ($2 \times 10\text{ ps}$).
+* New Minimum Clock Cycle = $5\text{ ps} + 20\text{ ps} + 5\text{ ps} = \mathbf{30\text{ ps}}$ ($\mathbf{33.3\text{ GHz}}$ instead of $20\text{ GHz}$), using the exact same $10\text{ ps}$ transistors.
