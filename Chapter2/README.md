@@ -172,49 +172,114 @@ If the Flip-Flop stayed open during the entire flat **High Level ($1\text{V}$)**
 2. Because the Flip-Flop door is **still open**, `6` immediately enters $\to$ flows back to the Adder $\to$ becomes `7` $\to$ `8` $\to$ `9`...
 3. This creates an uncontrollable runaway loop within a single clock cycle.
 
-To prevent input and output from ever connecting simultaneously, a Flip-Flop must capture data **only at the instantaneous transition edge**, behaving like a two-door airlock.
+To prevent input and output from ever connecting simultaneously, a Flip-Flop must capture data **only at the instantaneous transition edge**, using two opposing **D-Latches** wired back-to-back.
 
 ---
 
-### 3. Inside a Flip-Flop: The Two-Door Airlock
+### 3. Inside a Flip-Flop: Master & Slave Latches (Memory Loops)
 
-An **Edge-Triggered Flip-Flop** consists of **two latches back-to-back** (Master and Slave) separated by an airlock chamber:
-* **Door 1 (Entrance / Master):** Open when Clock is **LOW ($0\text{V}$)**; locked when HIGH.
-* **Door 2 (Exit / Slave):** Locked when Clock is **LOW ($0\text{V}$)**; open when **HIGH ($1\text{V}$)**.
-
-Because they react oppositely to the clock voltage, **Door 1 and Door 2 are never open at the same time**:
+Why doesn't the stored value vanish when a latch closes? Because a **D-Latch** is not just a switch—it is a switch paired with a **self-reinforcing memory loop** (built from cross-coupled `NOT` gates/buffers):
 
 ```text
-  Input Wire ──► [ Door 1 ] ──► ( Airlock Chamber ) ──► [ Door 2 ] ──► Output Wire
+         ENABLE = 1 (OPEN / TRANSPARENT)               ENABLE = 0 (LOCKED / MEMORY LOOP)
+         ───────────────────────────────               ─────────────────────────────────
+                     Switch connects to Input                      Switch flips to Feedback Loop
+  Input D ────► (1) ○────┐                              Input D ────► (1)  (Blocked!)
+                         ├──► [ Buffer ] ──► Out                           ┌──► [ Buffer ] ──► Out
+       ┌─────── (0)      │                                   ┌─────── (0) ○┘        │
+       │                 │                                   │                      │
+       └─────────────────┘                                   └──────────────────────┘
+  (Output follows Input directly)                       (Output feeds back into itself forever!)
 ```
 
-#### Step-by-Step Cycle Walkthrough:
+An **Edge-Triggered Flip-Flop** connects a **Master Latch** and a **Slave Latch** back-to-back, controlled by the same Clock wire—with a **`NOT` gate** inverting Master's clock signal:
 
-1. **Clock is LOW ($0\text{V}$):**
+```text
+  Input ──► [ MASTER LATCH ] ──► (Wire M) ──► [ SLAVE LATCH ] ──► Output
+             (Switch + Loop)                   (Switch + Loop)
+                   ▲                                 ▲
+                   │ (Inverted Clock:                │ (Direct Clock:
+                   │  Open when Clock=0)             │  Open when Clock=1)
+                [ NOT ]                              │
+                   ▲                                 │
+                   └────────── CLOCK WIRE ───────────┘
+```
+
+#### The 4-Snapshot Sequence Across One Clock Cycle
+
+Assume Slave's memory loop initially holds **`5`**, and `Input D` carries **`6`**:
+
+1. **`CLK = 0` (LOW):**
+   * **Master** receives `1` (OPEN) $\to$ tracks `Input D` (`6`) onto `Wire M`.
+   * **Slave** receives `0` (LOCKED) $\to$ ignores `Wire M`; its own feedback loop keeps broadcasting **`5`**.
    ```text
-   Input (New Data: 6) ──► [ Door 1: OPEN ] ──► ( 6 enters ) ──► [ Door 2: LOCKED ] ──► Output stays 5
+    Input (6) ──► [ MASTER: OPEN ] ────► (Wire M = 6) ────► [ SLAVE: LOCKED ] ──► Output = 5
+                     D ──► M                                   ┌──► Loop ──┐
+                                                               └────(5)────┘
    ```
-   * New data (`6`) from the Adder enters the chamber, while Door 2 keeps the external Output Wire steadily at `5`.
 
-2. **THE RISING EDGE ($0\text{V} \to 1\text{V}$ transition):**
+2. **`CLK: 0 → 1` (RISING EDGE $\uparrow$):**
+   * **Master** receives `0` (LOCKS!) $\to$ snaps its switch to its loop, freezing `Wire M` at **`6`**.
+   * **Slave** receives `1` (OPENS!) $\to$ reads `Wire M` (`6`) straight into its loop and publishes **`6`** to `Output`.
    ```text
-   Input (Changes to 7!) ──► [ Door 1: LOCKED ] ──► ( 6 ) ──► [ Door 2: OPEN ] ──► Output becomes 6!
+    Input (now 7) ──► [ MASTER: LOCKED ] ──► (Wire M = 6) ──► [ SLAVE: OPEN ] ──► Output = 6!
+                         ┌──► Loop ──┐                           M ──► Output
+                         └────(6)────┘
    ```
-   * At the exact upward transition, **Door 1 slams shut** (trapping `6`) and **Door 2 opens** (publishing `6` to the Output Wire).
-   * Even if `6` immediately races through the Adder to produce `7`, Door 1 is locked—`7` cannot sneak into the chamber.
 
-3. **Clock is HIGH ($1\text{V}$):**
-   * Door 1 remains locked while `7` waits outside; Door 2 keeps the Output Wire steadily at `6`.
+3. **`CLK = 1` (HIGH):**
+   * Even if `Input D` flickers wildly (`7` $\to$ `9` $\to$ `7`) from upstream logic, **Master** stays locked, keeping `Wire M` and `Output` rock-solid at **`6`**.
+   ```text
+    Input (9, glitches!) ──► [ MASTER: LOCKED ] ──► (Wire M = 6) ──► [ SLAVE: OPEN ] ──► Output = 6
+                                ┌──► Loop ──┐                           M ──► Output
+                                └────(6)────┘
+   ```
 
-4. **THE FALLING EDGE ($1\text{V} \to 0\text{V}$ transition):**
-   * At the exact downward transition, **Door 2 slams shut** (freezing `6` on the Output Wire) and **Door 1 opens**, allowing `7` to enter the airlock for the next cycle.
+4. **`CLK: 1 → 0` (FALLING EDGE $\downarrow$):**
+   * **Slave** receives `0` directly (LOCKS *first*!) $\to$ snaps back to its own feedback loop, keeping `Output` frozen at **`6`**.
+   * **Master** receives `1` via the `NOT` gate (OPENS!) $\to$ begins tracking the waiting `7` onto `Wire M` for the next cycle.
+   ```text
+    Input (7) ──► [ MASTER: OPEN ] ────► (Wire M = 7) ────► [ SLAVE: LOCKED ] ──► Output STILL 6!
+                     D ──► M                                   ┌──► Loop ──┐
+                                                               └────(6)────┘
+   ```
 
 ---
 
-### 4. Connection to CPU Execution vs. DDR Memory
+### 4. Oscilloscope Timing Diagram (Over Time)
+
+Reading left to right, notice how **Output (`Q`)** updates *only* at the **Rising Edge ($\uparrow$)**, completely isolated from changes and glitches on `Input D` and `Wire M`:
+
+```text
+           LOW           HIGH            LOW            HIGH
+CLK      _______        ________        ________        ________
+        |       |      |        |      |        |      |        |
+    ────┘       └──────┘        └──────┘        └──────┘        └────
+                ▲      ▲        ▲      ▲        ▲
+             Rising  Falling  Rising Falling  Rising
+             Edge ↑  Edge ↓   Edge ↑ Edge ↓   Edge ↑
+
+Input D   [  6  ][ 7 ][  9  ][   7    ][  8  ][  3  ][    4    ]
+           (Changes & glitches whenever upstream logic runs)
+
+Master     OPEN   LOCKED  LOCKED  OPEN    LOCKED  LOCKED  OPEN
+Slave     LOCKED   OPEN   OPEN   LOCKED    OPEN   OPEN   LOCKED
+
+Wire M    [  6  ][      6       ][  7→8 ][      8       ][  3→4 ]
+          (Tracks D)  (Frozen!)  (Tracks D)  (Frozen!)  (Tracks D)
+
+Output Q  [     5     ][       6        ][       8        ][  4  ]
+                      ▲                 ▲                 ▲
+                  Updates ONLY      Updates ONLY      Updates ONLY
+                  at Rising Edge!   at Rising Edge!   at Rising Edge!
+```
+
+---
+
+### 5. Connection to CPU Execution vs. DDR Memory
 
 * **Standard CPU Flip-Flops (Single-Edge Triggered):**
-  * Output updates only once per clock cycle on the **Rising Edge** (when Door 2 opens); the Falling Edge resets Door 1 for the next input.
+  * Output updates only once per clock cycle on the **Rising Edge** (when the Slave Latch opens); the Falling Edge locks Slave and opens Master for the next input.
 * **DDR Memory ("Double Pumping" — Dual-Edge Triggered):**
   * DDR memory places two parallel output circuits on the bus pins:
     * **Flip-Flop A** is triggered normally on the **Rising Edge** ($0 \to 1$) to send Data 1.
@@ -234,64 +299,84 @@ To keep the fast outer pins saturated without speeding up the physical capacitor
 
 ---
 
-### 1. Hardware Architecture Inside a DDR5 Chip
+### 1. Hardware Architecture Inside a DDR5 Chip (Counting Every Wire)
 
-Suppose a DRAM chip exposes **8 external copper data pins** to the motherboard (`x8` chip). Internally, three stages sit between the capacitors and the outer pins:
+Suppose a single DDR5 chip exposes **8 external copper data pins** (`Pin 0` to `Pin 7`) to the motherboard (`x8` chip). Because there are 8 pins, it can output **1 Byte (8 bits)** at any single instant. Let’s call each 1-Byte piece **`B0`, `B1`, ..., `B15`** (16 consecutive bytes in memory, e.g., `0x1000`–`0x100F`).
+
+All **128 internal wires** flow in parallel into the Multiplexer (`MUX`), which steps through them one byte at a time onto the **8 external pins**:
 
 ```text
-  STAGE 1: SLOW CAPACITOR GRID            STAGE 2: FAST I/O BUFFER          STAGE 3: FAST OUTER PINS
-        (200 MHz Core)                     (Flip-Flop Gearbox)               (1600 MHz + DDR Edges)
+  STAGE 1: CAPACITOR GRID          STAGE 2: 16 BYTE-SLOTS          STAGE 3: THE MUX (16-to-1 SWITCH)
+      (Slow: 200 MHz)                (Fast Flip-Flops)                 (Driven by Fast 1600 MHz)
 
-  ┌─────────────────────────┐          ┌─────────────────────────┐
-  │ [C0][C1][C2] ... [C15]  │          │                         │
-  │  │   │   │        │     │  16x     │ [C0][C1][C2] ... [C15]  │          ┌───┐
-  │  ▼   ▼   ▼        ▼     │ Wide Bus │                         │          │ M │──► Pin 0..7
-  │  (128 internal wires!)  │═════════►│  Holds all 16 chunks    │═════════►│ U │    (8 pins ONLY!)
-  │                         │  1 slow  │  in fast Flip-Flops     │  16 fast │ X │    Pumps: C0, C1,
-  │ Fires ONCE per 5 ns     │   tick   │                         │  bursts  └───┘    C2... C15
-  └─────────────────────────┘          └─────────────────────────┘            ▲
-                                                                              │
-                                                                     External Clock (8x)
-                                                                     + Rising/Falling Edges
+  ┌─────────────────────┐          ┌───────────────────┐
+  │ Reads 16 Bytes      │ 8 wires  │ Slot 0:  [  B0  ] ┼── 8 wires ──►┐
+  │ AT ONCE in 1 tick:  ├─────────►│ Slot 1:  [  B1  ] ┼── 8 wires ──►│
+  │                     │ 8 wires  │ Slot 2:  [  B2  ] ┼── 8 wires ──►│   ┌─────────┐
+  │  B0, B1, B2 ... B15 ├─────────►│   ...      ...    │    ...       ├──►│         │   8 Wires
+  │                     │   ...    │ Slot 14: [  B14 ] ┼── 8 wires ──►│   │   MUX   ├──(Pin 0..7)──► To CPU
+  │ (16 bytes × 8 bits  │ 8 wires  │ Slot 15: [  B15 ] ┼── 8 wires ──►┘   │ (Dial)  │   (1 Byte
+  │  = 128 wires total) ├─────────►└───────────────────┘                  └────▲────┘    at a time!)
+  └─────────────────────┘            (128 wires total                          │
+             ▲                        enter the MUX!)                          │
+             │                                                         ┌───────┴────────┐
+     Slow Core Clock                                                   │ 4-bit Counter  │
+       (200 MHz)                                                       │ Counts: 0 → 15 │
+                                                                       └───────▲────────┘
+                                                                               │
+                                                                       Fast External Clock
+                                                                    (Ticks on EVERY ↑ & ↓ edge)
 ```
 
-*(Here, `MUX` is a **Multiplexer**—an electronic selector switch that streams buffered chunks sequentially onto the narrow external pins.)*
+1. **Why 128 internal wires?** Each byte requires 8 physical wires (1 per bit). Reading 16 bytes simultaneously from the slow capacitor grid requires $16 \times 8 = \mathbf{128\text{ parallel wires}}$.
+2. **Stage 2 (16 Byte-Slots):** A bank of **16 separate 8-bit Flip-Flop registers**. On **one slow tick ($200\text{ MHz}$)**, the grid loads `B0` into Slot 0, `B1` into Slot 1, ..., and `B15` into Slot 15 simultaneously.
+3. **Stage 3 (The MUX + 4-bit Counter):** The **Multiplexer (`MUX`)** acts like a rotary dial with 16 input sockets (`Slot 0`..`Slot 15`, 8 wires each) and **1 output socket** (`Pin 0..7`, 8 wires):
+   * Counter = `0`: MUX connects **Slot 0 (`B0`)** $\to$ `Pin 0..7`.
+   * Counter = `1`: MUX disconnects Slot 0 and connects **Slot 1 (`B1`)** $\to$ `Pin 0..7`.
+   * ...
+   * Counter = `15`: MUX connects **Slot 15 (`B15`)** $\to$ `Pin 0..7`.
 
 ---
 
-### 2. Step-by-Step Walkthrough of a Single "Burst"
+### 2. Aligning Both Clocks in Time (Why 1 Slow Tick = 16 Fast Beats)
 
-Suppose the CPU requests the byte at address `0x1000`:
-
-1. **Wide Parallel Read (Prefetching):**
-   * Internally, the wires between the capacitor array and the buffer are **16 times wider** than the external pins ($16 \times 8 = 128\text{ bits}$).
-   * In **one single slow tick ($200\text{ MHz}$)**, the DRAM grid pulls **16 consecutive chunks at once** (`C0` through `C15`, covering `0x1000..0x100F`) into the sense amplifiers.
-2. **Dumping into the Fast Buffer:**
-   * All 16 chunks drop simultaneously into the **Prefetch / I/O Buffer**, which is built from fast transistor **Flip-Flops** (not slow capacitors).
-   * The slow capacitor grid then immediately begins recharging for the next batch.
-3. **Bursting Out onto the Narrow Pins (Parallel-to-Serial):**
-   * Driven by the fast external I/O clock ($8\times$ internal clock = $1600\text{ MHz}$) and **Double Pumping** (both rising and falling edges), the Multiplexer fires the 16 buffered chunks sequentially out of the 8 external pins:
+Look at the **Slow Internal Clock ($200\text{ MHz}$)** and **Fast External Clock ($1600\text{ MHz}$)** aligned over the **exact same $5.0\text{ ns}$ window**:
 
 ```text
-External Clock:   ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐
-                ──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──
-                  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼
-Pins Output:     C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 C10C11C12C13C14C15
-                 │◄────────────── 16-Beat Burst ───────────────►│
-                 (All delivered during ONE slow internal 200 MHz tick!)
+1. SLOW INTERNAL CLOCK (200 MHz — 1 Full Cycle = 5.0 ns):
+   ┌───────────────────────┐                       ┌───────────────────────┐
+   │  1. Capacitors Dump   │ 2. Capacitors Recharge│  Next Dump:           │
+───┘     B0..B15 to Slots  └───────────────────────┘  B16..B31 to Slots    └─────
+   ▲                                               ▲
+ t = 0.0 ns                                      t = 5.0 ns
+
+
+2. FAST EXTERNAL CLOCK (1600 MHz — 8 Full Cycles fit inside that ONE 5.0 ns window!):
+   ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐  ┌──┐
+───┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──┘  └──
+   ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼  ▲  ▼
+
+3. MUX COUNTER (Advances by +1 on EVERY Rising ▲ and Falling ▼ edge):
+   0  1  2  3  4  5  6  7  8  9  10 11 12 13 14 15 0  1  2  3  4  5  6  7  8  9 ...
+
+4. DATA APPEARING ON THE 8 EXTERNAL PINS (Pin 0..7):
+   B0 B1 B2 B3 B4 B5 B6 B7 B8 B9 B10B11B12B13B14B15B16B17B18B19B20B21B22B23B24...
+   │◄────────── 16-Beat Burst (16 Bytes) ─────────►│◄─── Next 16-Beat Burst ────►
 ```
 
-* By the time `C15` leaves the pins, the slow capacitor array has finished recharging and drops the next 16 chunks into the buffer seamlessly.
+* **At $t = 0.0\text{ ns}$ (Slow Clock ticks once):** All 16 bytes (`B0..B15`) drop across the 128 wires into the Flip-Flop slots; the capacitors go off duty for $5.0\text{ ns}$ to recharge and prepare `B16..B31`.
+* **From $t = 0.0\text{ ns} \to 5.0\text{ ns}$ (8 External Cycles = 16 Edges):** Because of **Double Pumping** (triggering on both Rising `▲` and Falling `▼` edges), the MUX Counter advances $8 \times 2 = \mathbf{16\text{ times}}$, pumping `B0` through `B15` out onto the 8 pins.
+* **At $t = 5.0\text{ ns}$:** Right as `B15` exits, the next batch (`B16..B31`) drops into the buffer and streams out seamlessly with zero idle gaps.
 
 ---
 
 ### 3. Critical Word First (Wrap-Around Burst Order)
 
-If the CPU specifically requested chunk `C5` in the middle of the 16-chunk block:
-* The DRAM still reads all 16 neighbors (`C0..C15`) into the buffer.
-* However, the Multiplexer starts the burst at **`C5` first**, then wraps around:
-  $$\text{Burst Order:} \quad \mathbf{C5} \to C6 \to C7 \to \dots \to C15 \to C0 \to C1 \to C2 \to C3 \to C4$$
-* The CPU receives the requested data on the very first beat, while the remaining 15 neighbors fill the rest of the **64-byte CPU Cache Line** right behind it.
+If the CPU specifically requested byte `B5` in the middle of the 16-byte block:
+* The DRAM still reads all 16 neighbors (`B0..B15`) into the buffer slots.
+* However, the MUX starts the counter at **`5` first**, then wraps around:
+  $$\text{Burst Order:} \quad \mathbf{B5} \to B6 \to B7 \to \dots \to B15 \to B0 \to B1 \to B2 \to B3 \to B4$$
+* The CPU receives the requested byte on the very first beat, while the remaining 15 neighbors fill the rest of the **64-byte CPU Cache Line** right behind it.
 
 ---
 
